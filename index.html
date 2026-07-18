@@ -522,6 +522,8 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <script>
 const REGIONS = [
   {region:'Arica y Parinacota', name:'Arica', lat:-18.4783, lon:-70.3126},
@@ -1253,14 +1255,54 @@ const CUENCAS_SEED = [
   }
 ];
 
-function loadLS(key, fallback){
-  try{
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  }catch(e){ return fallback; }
+// ============ Firebase Realtime Database (sincronización compartida) ============
+const firebaseConfig = {
+  apiKey: "AIzaSyA7lZ-kmZdAuDuwucnVtnxYAWRbGDhRRac",
+  authDomain: "panel-meteorologico-chile.firebaseapp.com",
+  databaseURL: "https://panel-meteorologico-chile-default-rtdb.firebaseio.com",
+  projectId: "panel-meteorologico-chile",
+  storageBucket: "panel-meteorologico-chile.firebasestorage.app",
+  messagingSenderId: "93138436607",
+  appId: "1:93138436607:web:be74821e36c0892be227ca",
+  measurementId: "G-LSEB3G8V3P"
+};
+
+let fbDb = null;
+let firebaseOk = false;
+try{
+  firebase.initializeApp(firebaseConfig);
+  fbDb = firebase.database();
+  firebaseOk = true;
+}catch(err){
+  console.error('No se pudo inicializar Firebase:', err);
 }
-function saveLS(key, value){
-  try{ localStorage.setItem(key, JSON.stringify(value)); }catch(e){ console.error('localStorage error', e); }
+
+let emgCache = [];
+let cuencaCache = null; // null = aún no ha llegado el primer valor desde Firebase
+
+function objToArraySortedDesc(obj){
+  if(!obj) return [];
+  return Object.keys(obj).map(id => ({ id, ...obj[id] })).sort((a,b) => (b.id > a.id ? 1 : -1));
+}
+
+if(firebaseOk){
+  fbDb.ref('emergencias').on('value', snap => {
+    emgCache = objToArraySortedDesc(snap.val());
+    if(emergenciasBuilt) renderEmgTable();
+  }, err => console.error('Error leyendo emergencias:', err));
+
+  fbDb.ref('cuencas').on('value', snap => {
+    const val = snap.val();
+    if(val === null){
+      // Nunca se ha escrito nada: sembrar con los 4 registros iniciales (solo ocurre una vez, para cualquier usuario que llegue primero)
+      const seedObj = {};
+      CUENCAS_SEED.forEach((c,i) => { seedObj['seed'+i] = c; });
+      fbDb.ref('cuencas').set(seedObj);
+      return; // el propio set() disparará este listener de nuevo con los datos ya sembrados
+    }
+    cuencaCache = objToArraySortedDesc(val);
+    if(emergenciasBuilt) renderCuencaTable();
+  }, err => console.error('Error leyendo cuencas:', err));
 }
 
 function populateRegionSelect(select, includeEmpty){
@@ -1304,19 +1346,15 @@ function buildEmergenciasTab(){
       alert('Selecciona al menos región y tipo de emergencia.');
       return;
     }
-    const registros = loadLS('emergencyRegistros', []);
+    if(!firebaseOk){ alert('No hay conexión con la base de datos compartida en este momento.'); return; }
+    const id = emgEditingId != null ? emgEditingId : Date.now().toString();
+    fbDb.ref('emergencias/' + id).set({ region, comuna, tipo, fecha, descripcion });
     if(emgEditingId != null){
-      const idx = registros.findIndex(r => r.id === emgEditingId);
-      if(idx >= 0) registros[idx] = { id: emgEditingId, region, comuna, tipo, fecha, descripcion };
       emgEditingId = null;
       $('emgAddBtn').textContent = '+ Agregar registro';
       $('emgCancelEditBtn').style.display = 'none';
-    }else{
-      registros.unshift({ id: Date.now(), region, comuna, tipo, fecha, descripcion });
     }
-    saveLS('emergencyRegistros', registros);
     $('emgTipo').value = ''; $('emgDescripcion').value = ''; $('emgFecha').value = ''; $('emgRegion').value=''; populateComunaSelect($('emgComuna'),'',false);
-    renderEmgTable();
   };
 
   $('emgCancelEditBtn').onclick = () => {
@@ -1355,23 +1393,17 @@ function buildEmergenciasTab(){
       alert('Selecciona al menos región y el nombre de la cuenca principal.');
       return;
     }
-    const stored = loadLS('cuencasRegistros', null);
-    const base = stored === null ? CUENCAS_SEED.map((c,i) => ({ id: 'seed'+i, ...c })) : stored;
-
+    if(!firebaseOk){ alert('No hay conexión con la base de datos compartida en este momento.'); return; }
+    const id = cuencaEditingId != null ? cuencaEditingId : Date.now().toString();
+    fbDb.ref('cuencas/' + id).set({ region, comuna, cuenca, cursos, localidades, impacto, anio });
     if(cuencaEditingId != null){
-      const idx = base.findIndex(r => r.id === cuencaEditingId);
-      if(idx >= 0) base[idx] = { id: cuencaEditingId, region, comuna, cuenca, cursos, localidades, impacto, anio };
       cuencaEditingId = null;
       $('cuencaAddBtn').textContent = '+ Agregar registro';
       $('cuencaCancelEditBtn').style.display = 'none';
-    }else{
-      base.unshift({ id: Date.now(), region, comuna, cuenca, cursos, localidades, impacto, anio });
     }
-    saveLS('cuencasRegistros', base);
     $('cuencaNombre').value=''; $('cuencaAnio').value=''; $('cuencaCursos').value='';
     $('cuencaLocalidades').value=''; $('cuencaImpacto').value=''; $('cuencaRegion').value='';
     populateComunaSelect($('cuencaComuna'),'',false);
-    renderCuencaTable();
   };
 
   $('cuencaCancelEditBtn').onclick = () => {
@@ -1396,7 +1428,7 @@ function buildEmergenciasTab(){
 }
 
 function renderEmgTable(){
-  const registros = loadLS('emergencyRegistros', []);
+  const registros = emgCache;
   const fRegion = $('emgFilterRegion').value;
   const fTipo = $('emgFilterTipo').value;
 
@@ -1438,17 +1470,14 @@ function renderEmgTable(){
       $('emgAddBtn').scrollIntoView({behavior:'smooth', block:'center'});
     };
     tr.querySelector('.dt-del').onclick = () => {
-      const updated = loadLS('emergencyRegistros', []).filter(x => x.id !== r.id);
-      saveLS('emergencyRegistros', updated);
-      renderEmgTable();
+      if(firebaseOk) fbDb.ref('emergencias/' + r.id).remove();
     };
     tbody.appendChild(tr);
   });
 }
 
 function renderCuencaTable(){
-  const stored = loadLS('cuencasRegistros', null);
-  const registros = stored === null ? CUENCAS_SEED.map((c,i) => ({ id: 'seed'+i, ...c })) : stored;
+  const registros = cuencaCache || [];
 
   const fRegion = $('cuencaFilterRegion').value;
   const fComuna = $('cuencaFilterComuna').value;
@@ -1506,10 +1535,7 @@ function renderCuencaTable(){
       $('cuencaAddBtn').scrollIntoView({behavior:'smooth', block:'center'});
     };
     tr.querySelector('.dt-del').onclick = () => {
-      const current = loadLS('cuencasRegistros', null) ?? CUENCAS_SEED.map((c,i) => ({ id: 'seed'+i, ...c }));
-      const updated = current.filter(x => x.id !== r.id);
-      saveLS('cuencasRegistros', updated);
-      renderCuencaTable();
+      if(firebaseOk) fbDb.ref('cuencas/' + r.id).remove();
     };
     tbody.appendChild(tr);
   });
@@ -1519,8 +1545,8 @@ $('refreshBtn').onclick = fetchAll;
 
 // ============ Region Map Widget (mapa regional + semáforo de comunas) ============
 
-
 fetchAll();
+setInterval(fetchAll, 5 * 60 * 1000); // auto-actualizar datos meteorológicos cada 5 minutos
 </script>
 </body>
 </html>
